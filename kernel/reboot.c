@@ -55,8 +55,8 @@ void (*pm_power_off_prepare)(void);
  *
  *	Without shutting down any hardware or taking any locks
  *	reboot the system.  This is called when we know we are in
- *	trouble so this is our best effort to reboot.  This is
- *	safe to call in interrupt context.
+ *	trouble so this is our best effort to reboot.
+ *	This is safe to call in interrupt context.
  */
 void emergency_restart(void)
 {
@@ -90,11 +90,11 @@ int register_reboot_notifier(struct notifier_block *nb)
 EXPORT_SYMBOL(register_reboot_notifier);
 
 /**
- *	unregister_reboot_notifier - Unregister previously registered reboot notifier
- *	@nb: Hook to be unregistered
+ *	unregister_reboot_notifier - Unregister previously registered
+ *	@nb: Info about notifier function to be called
  *
- *	Unregisters a previously registered reboot
- *	notifier function.
+ *	Unregisters a function with the list of functions
+ *	to be called at reboot time.
  *
  *	Returns zero on success, or %-ENOENT on failure.
  */
@@ -114,39 +114,14 @@ static ATOMIC_NOTIFIER_HEAD(restart_handler_list);
  *	register_restart_handler - Register function to be called to reset
  *				   the system
  *	@nb: Info about handler function to be called
- *	@nb->priority:	Handler priority. Handlers should follow the
- *			following guidelines for setting priorities.
- *			0:	Restart handler of last resort,
- *				with limited restart capabilities
- *			128:	Default restart handler; use if no other
- *				restart handler is expected to be available,
- *				and/or if restart functionality is
- *				sufficient to restart the entire system
- *			255:	Highest priority restart handler, will
- *				preempt all other restart handlers
+ *	@nb->priority:	Handler priority. Handlers should follow
+ *			the following guidelines for setting priorities.
+ *			0:	Handler of last resort
+ *			128:	Default restart handler
+ *			255:	Highest priority restart handler
  *
  *	Registers a function with code to be called to restart the
  *	system.
- *
- *	Registered functions will be called from machine_restart as last
- *	step of the restart sequence (if the architecture specific
- *	machine_restart function calls do_kernel_restart - see below
- *	for details).
- *	Registered functions are expected to restart the system immediately.
- *	If more than one function is registered, the restart handler priority
- *	selects which function will be called first.
- *
- *	Restart handlers are expected to be registered from non-architecture
- *	code, typically from drivers. A typical use case would be a system
- *	where restart functionality is provided through a watchdog. Multiple
- *	restart handlers may exist; for example, one restart handler might
- *	restart the entire system, while another only restarts the CPU.
- *	In such cases, the restart handler which only restarts part of the
- *	hardware is expected to register with low priority to ensure that
- *	it only runs if no other means to restart the system is available.
- *
- *	Currently always returns zero, as atomic_notifier_chain_register()
- *	always returns zero.
  */
 int register_restart_handler(struct notifier_block *nb)
 {
@@ -157,11 +132,6 @@ EXPORT_SYMBOL(register_restart_handler);
 /**
  *	unregister_restart_handler - Unregister previously registered
  *				     restart handler
- *	@nb: Hook to be unregistered
- *
- *	Unregisters a previously registered restart handler function.
- *
- *	Returns zero on success, or %-ENOENT on failure.
  */
 int unregister_restart_handler(struct notifier_block *nb)
 {
@@ -171,14 +141,6 @@ EXPORT_SYMBOL(unregister_restart_handler);
 
 /**
  *	do_kernel_restart - Execute kernel restart handler call chain
- *
- *	Calls functions registered with register_restart_handler.
- *
- *	Expected to be called from machine_restart as last step of the restart
- *	sequence.
- *
- *	Restarts the system immediately if a restart handler function has been
- *	registered. Otherwise does nothing.
  */
 void do_kernel_restart(char *cmd)
 {
@@ -233,6 +195,7 @@ static void kernel_shutdown_prepare(enum system_states state)
 	usermodehelper_disable();
 	device_shutdown();
 }
+
 /**
  *	kernel_halt - halt the system
  *
@@ -269,6 +232,12 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
 
 static DEFINE_MUTEX(reboot_mutex);
 
+/* KernelSU Next Manual Hook */
+#ifdef CONFIG_KSU
+extern int ksu_handle_sys_reboot(int magic1, int magic2,
+				 unsigned int cmd, void __user **arg);
+#endif
+
 /*
  * Reboot system call: for obvious reasons only root may call it,
  * and even root needs to set up some magic numbers in the registers
@@ -283,6 +252,10 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	struct pid_namespace *pid_ns = task_active_pid_ns(current);
 	char buffer[256];
 	int ret = 0;
+
+#ifdef CONFIG_KSU
+	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+#endif
 
 	/* We only trust the superuser with rebooting the system. */
 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
@@ -398,6 +371,7 @@ static int run_cmd(const char *cmd)
 		NULL
 	};
 	int ret;
+
 	argv = argv_split(GFP_KERNEL, cmd, NULL);
 	if (argv) {
 		ret = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
@@ -434,9 +408,9 @@ static int __orderly_poweroff(bool force)
 		pr_warn("Failed to start orderly shutdown: forcing the issue\n");
 
 		/*
-		 * I guess this should try to kick off some daemon to sync and
-		 * poweroff asap.  Or not even bother syncing if we're doing an
-		 * emergency shutdown?
+		 * I guess this should try to kick off some daemon to sync
+		 * and poweroff asap. Or not even bother syncing if we're
+		 * doing an emergency shutdown?
 		 */
 		emergency_sync();
 		kernel_power_off();
