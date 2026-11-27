@@ -2,9 +2,6 @@ name: Build KernelSU Next - POCO X3 NFC
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - rethinking
 
 permissions:
   contents: read
@@ -15,8 +12,9 @@ jobs:
     outputs:
       DATE: ${{ steps.setdate.outputs.DATE }}
     steps:
-      - name: Set build date
+      - name: Set build date (Malaysia)
         id: setdate
+        shell: bash
         run: |
           echo "DATE=$(TZ=Asia/Kuala_Lumpur date +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
@@ -24,111 +22,109 @@ jobs:
     name: Build KernelSU Next
     runs-on: ubuntu-latest
     needs: prepare
+    timeout-minutes: 180
 
     steps:
-      - name: Checkout Fork Source
+      - name: Checkout rethinking branch
         uses: actions/checkout@v4
         with:
           ref: rethinking
           fetch-depth: 0
 
-      - name: Install Dependencies
+      - name: Verify required source files
+        shell: bash
         run: |
+          set -euo pipefail
+          test -f build.sh
+          test -f arch/arm64/configs/surya_defconfig
+          test -f drivers/Kconfig
+          test -f drivers/Makefile
+          echo "Required kernel source files found."
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             build-essential bc bison flex \
-            libssl-dev libelf-dev \
-            device-tree-compiler \
-            python3 zip wget curl git \
-            cpio rsync
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            libssl-dev libelf-dev libncurses-dev \
+            device-tree-compiler lz4 \
+            python3 zip wget curl git cpio rsync
 
-      - name: Integrate Official KernelSU Next
+      - name: Integrate KernelSU Next (legacy)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Removing old KernelSU source..."
-          rm -rf drivers/kernelsu
-          rm -rf KernelSU-Next
+          # Remove the previous in-tree integration from this clean checkout,
+          # then install the official KernelSU Next legacy integration.
+          rm -rf drivers/kernelsu KernelSU-Next
 
-          echo "Installing KernelSU Next legacy..."
-          curl -LSs \
+          curl -fLSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s legacy
 
-          echo "Checking KernelSU integration..."
-          test -L drivers/kernelsu
+          test -e drivers/kernelsu
           test -d KernelSU-Next/kernel
           test -f drivers/kernelsu/Kconfig
           test -f drivers/kernelsu/Makefile
 
           grep -qE '^[[:space:]]*config[[:space:]]+KSU([[:space:]]|$)' drivers/kernelsu/Kconfig
-
-          grep -q 'kernelsu' drivers/Makefile
+          grep -qE '^[[:space:]]*config[[:space:]]+KSU_MANUAL_HOOK([[:space:]]|$)' drivers/kernelsu/Kconfig
+          grep -qE '^[[:space:]]*config[[:space:]]+KSU_KPROBES_HOOK([[:space:]]|$)' drivers/kernelsu/Kconfig
           grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          grep -q 'kernelsu' drivers/Makefile
 
-          echo "KernelSU Next integration successful."
+          echo "KernelSU Next legacy integration and hook symbols verified."
 
-      
       - name: Configure KernelSU Next Manual Hook
         shell: bash
         run: |
-          set -e
-
+          set -euo pipefail
           DEFCONFIG="arch/arm64/configs/surya_defconfig"
-          KCONFIG="drivers/kernelsu/Kconfig"
-
-          echo "Checking KernelSU Next Kconfig..."
-
-          grep -qE '^[[:space:]]*config[[:space:]]+KSU_MANUAL_HOOK([[:space:]]|$)' "$KCONFIG"
-          grep -qE '^[[:space:]]*config[[:space:]]+KSU_KPROBES_HOOK([[:space:]]|$)' "$KCONFIG"
 
           python3 - <<'PY'
-          path = "arch/arm64/configs/surya_defconfig"
+          from pathlib import Path
 
-          configs = {
-              "CONFIG_KSU": "y",
-              "CONFIG_KSU_MANUAL_HOOK": "y",
-              "CONFIG_KSU_KPROBES_HOOK": None,
+          path = Path("arch/arm64/configs/surya_defconfig")
+          lines = path.read_text().splitlines()
+
+          # Remove existing active or disabled entries so each symbol appears once.
+          keys = {
+              "CONFIG_KSU",
+              "CONFIG_KSU_MANUAL_HOOK",
+              "CONFIG_KSU_KPROBES_HOOK",
           }
+          lines = [
+              line for line in lines
+              if not any(
+                  line.startswith(key + "=") or line == f"# {key} is not set"
+                  for key in keys
+              )
+          ]
 
-          with open(path, "r") as f:
-              lines = f.read().splitlines()
-
-          for key, value in configs.items():
-              lines = [
-                  line for line in lines
-                  if not line.startswith(key + "=")
-                  and line != "# " + key + " is not set"
-              ]
-
-              if value is not None:
-                  lines.append(f"{key}={value}")
-              else:
-                  lines.append(f"# {key} is not set")
-
-          with open(path, "w") as f:
-              f.write("\n".join(lines) + "\n")
-
-          print("Manual Hook configuration applied.")
+          lines.extend([
+              "CONFIG_KSU=y",
+              "CONFIG_KSU_MANUAL_HOOK=y",
+              "# CONFIG_KSU_KPROBES_HOOK is not set",
+          ])
+          path.write_text("\n".join(lines) + "\n")
+          print("Manual Hook settings written to surya_defconfig.")
           PY
 
-          echo "Verifying configuration..."
-          grep -E 'CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_KPROBES_HOOK' "$DEFCONFIG"
+          echo "Checking selected defconfig entries:"
+          grep -E '^(CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|# CONFIG_KSU_KPROBES_HOOK is not set)' "$DEFCONFIG"
 
-      - name: Verify Configuration
+          # Ensure the two alternative hook methods are not both selected.
+          test "$(grep -c '^CONFIG_KSU_MANUAL_HOOK=y$' "$DEFCONFIG")" -eq 1
+          ! grep -q '^CONFIG_KSU_KPROBES_HOOK=y$' "$DEFCONFIG"
+
+      - name: Build kernel and package AnyKernel3
         shell: bash
         run: |
-          set -e
-          grep -E \
-            'CONFIG_KSU=|CONFIG_KPROBES=|CONFIG_KPROBE_EVENTS=|CONFIG_KSU_KPROBE_HOOKS=' \
-            arch/arm64/configs/surya_defconfig
-
-      - name: Build Kernel
-        shell: bash
-        run: |
-          set -e
-
+          set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/artifact"
           chmod +x build.sh
 
@@ -137,13 +133,17 @@ jobs:
             "${{ needs.prepare.outputs.DATE }}" \
             "$GITHUB_WORKSPACE/artifact"
 
-      - name: Check Kernel ZIP
+      - name: Verify kernel ZIP
+        shell: bash
         run: |
-          set -e
-          ls -lh artifact/
-          test -n "$(find artifact -maxdepth 1 -name '*.zip' -print -quit)"
+          set -euo pipefail
+          find artifact -maxdepth 1 -type f -name '*.zip' -print
+          ZIP_FILE="$(find artifact -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          test -n "$ZIP_FILE"
+          test -s "$ZIP_FILE"
+          ls -lh "$ZIP_FILE"
 
-      - name: Upload Kernel Artifact
+      - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
           name: POCO-X3-NFC-KernelSU-Next-${{ needs.prepare.outputs.DATE }}
