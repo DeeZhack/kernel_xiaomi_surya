@@ -69,19 +69,27 @@ jobs:
 
           echo "KernelSU Next integration successful."
 
-      - name: Configure KernelSU Next
+      
+      - name: Configure KernelSU Next Manual Hook
         shell: bash
         run: |
           set -e
+
+          DEFCONFIG="arch/arm64/configs/surya_defconfig"
+          KCONFIG="drivers/kernelsu/Kconfig"
+
+          echo "Checking KernelSU Next Kconfig..."
+
+          grep -qE '^[[:space:]]*config[[:space:]]+KSU_MANUAL_HOOK([[:space:]]|$)' "$KCONFIG"
+          grep -qE '^[[:space:]]*config[[:space:]]+KSU_KPROBES_HOOK([[:space:]]|$)' "$KCONFIG"
 
           python3 - <<'PY'
           path = "arch/arm64/configs/surya_defconfig"
 
           configs = {
               "CONFIG_KSU": "y",
-              "CONFIG_KPROBES": "y",
-              "CONFIG_KPROBE_EVENTS": "y",
-              "CONFIG_KSU_KPROBE_HOOKS": "y",
+              "CONFIG_KSU_MANUAL_HOOK": "y",
+              "CONFIG_KSU_KPROBES_HOOK": None,
           }
 
           with open(path, "r") as f:
@@ -93,15 +101,20 @@ jobs:
                   if not line.startswith(key + "=")
                   and line != "# " + key + " is not set"
               ]
-              lines.append(f"{key}={value}")
+
+              if value is not None:
+                  lines.append(f"{key}={value}")
+              else:
+                  lines.append(f"# {key} is not set")
 
           with open(path, "w") as f:
               f.write("\n".join(lines) + "\n")
 
-          print("KernelSU Next configuration:")
-          for key, value in configs.items():
-              print(f"{key}={value}")
+          print("Manual Hook configuration applied.")
           PY
+
+          echo "Verifying configuration..."
+          grep -E 'CONFIG_KSU=|CONFIG_KSU_MANUAL_HOOK=|CONFIG_KSU_KPROBES_HOOK' "$DEFCONFIG"
 
       - name: Verify Configuration
         shell: bash
