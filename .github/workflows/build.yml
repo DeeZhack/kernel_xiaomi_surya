@@ -15,7 +15,8 @@ jobs:
     outputs:
       DATE: ${{ steps.setdate.outputs.DATE }}
     steps:
-      - id: setdate
+      - name: Set build date
+        id: setdate
         run: |
           echo "DATE=$(TZ=Asia/Kuala_Lumpur date +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
 
@@ -42,25 +43,37 @@ jobs:
             cpio rsync
 
       - name: Integrate Official KernelSU Next
+        shell: bash
         run: |
           set -e
 
-          # Remove old KernelSU source only on runner
+          echo "Removing old KernelSU source..."
           rm -rf drivers/kernelsu
           rm -rf KernelSU-Next
 
-          # Install official KernelSU Next legacy
+          echo "Installing KernelSU Next legacy..."
           curl -LSs \
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             | bash -s legacy
 
-          # Verify integration
+          echo "Checking KernelSU integration..."
           test -L drivers/kernelsu
           test -d KernelSU-Next/kernel
-          grep -q 'CONFIG_KSU' drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+
+          grep -qE '^[[:space:]]*config[[:space:]]+KSU([[:space:]]|$)' drivers/kernelsu/Kconfig
+
+          grep -q 'kernelsu' drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+
+          echo "KernelSU Next integration successful."
 
       - name: Configure KernelSU Next
+        shell: bash
         run: |
+          set -e
+
           python3 - <<'PY'
           path = "arch/arm64/configs/surya_defconfig"
 
@@ -85,19 +98,24 @@ jobs:
           with open(path, "w") as f:
               f.write("\n".join(lines) + "\n")
 
-          print("KernelSU Next configuration updated:")
+          print("KernelSU Next configuration:")
           for key, value in configs.items():
               print(f"{key}={value}")
           PY
 
-      - name: Verify KernelSU Configuration
+      - name: Verify Configuration
+        shell: bash
         run: |
+          set -e
           grep -E \
             'CONFIG_KSU=|CONFIG_KPROBES=|CONFIG_KPROBE_EVENTS=|CONFIG_KSU_KPROBE_HOOKS=' \
             arch/arm64/configs/surya_defconfig
 
       - name: Build Kernel
+        shell: bash
         run: |
+          set -e
+
           mkdir -p "$GITHUB_WORKSPACE/artifact"
           chmod +x build.sh
 
@@ -106,7 +124,13 @@ jobs:
             "${{ needs.prepare.outputs.DATE }}" \
             "$GITHUB_WORKSPACE/artifact"
 
-      - name: Upload Kernel ZIP
+      - name: Check Kernel ZIP
+        run: |
+          set -e
+          ls -lh artifact/
+          test -n "$(find artifact -maxdepth 1 -name '*.zip' -print -quit)"
+
+      - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: POCO-X3-NFC-KernelSU-Next-${{ needs.prepare.outputs.DATE }}
